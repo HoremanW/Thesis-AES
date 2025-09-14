@@ -1,0 +1,17 @@
+name: thesis-aes
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - matplotlib
+  - jupyterlab
+  - ipykernel
+  - scipy
+  - openpyxl        # Excel support for pandas
+  - pyarrow         # Parquet support
+  - pip
+  - pip:
+      # add pip-only packages here if needed

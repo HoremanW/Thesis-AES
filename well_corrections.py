@@ -48,7 +48,7 @@ def hydrostatic_correct_to_fracture(
     Hydrostatic correction: P_fracture(t) = P_gauge(t) + ρ(t) * g * ΔTVD.
     """
 
-    #rho_surface.loc[:] = rho_surface.iloc[1]
+    rho_surface.loc[:] = rho_surface.iloc[1]
     # Optionally shift gauge times to align with surface density sampling
     tg = pd.to_datetime(pd.Series(time_gauge), errors='coerce')
     if lag_s is not None:

@@ -42,7 +42,6 @@ def get_or_nan(df, col):
         return to_num(df[col])
     return pd.Series([np.nan] * len(df), index=df.index, dtype=float)
 
-
 # ----------------------------
 # Example usage
 # ----------------------------
@@ -73,7 +72,7 @@ time_downhole = pd.to_datetime(dfD['Time'].astype(str).str.strip(),
 # Numeric columns (Surface)
 # ----------------------------
 pressure_S          = get_or_nan(dfS, 'Treating Pressure')
-flowrate_S          = get_or_nan(dfS, 'Flow Rate')
+flowrate_S          = get_or_nan(dfS, 'Flow Rate') * 0.06  # l/min -> m³/h
 density_S           = get_or_nan(dfS, 'Density')
 volume_S            = get_or_nan(dfS, 'Volume')
 tot_volume_nrd_S    = get_or_nan(dfS, 'TOT vol nrd')
@@ -134,8 +133,6 @@ pressure_D    = pressure_D[maskD]
 temperature_D = temperature_D[maskD]
 
 print('downhole time min/max:', (time_downhole.min(), time_downhole.max()))
-print('pressure (surface) head:', pressure_S.head(3).to_list())
-print('pressure (downhole) head:', pressure_D.head(3).to_list())
 
 # ----------------------------
 # Surface panels
@@ -171,12 +168,12 @@ gauge_index    = 1  # index of the downhole gauge in the MD/TVD arrays
 # NOTE: we use the (MD, TVD, gauge_index, TVD_fracture_m) signature per the fixed helper
 TVD_interp, TVD_gauge_m, delta_tvd_m = well_corrections.estimate_lag(MD, TVD, gauge_index, TVD_fracture_m)
 
-# Estimate delay (surface vs downhole)
+# Estimate delay (surface vs downhole) — IMPORTANT: use masked series (time_S/time_D)
 try:
     lag_s, grid_step = time_difference.estimate_delay_seconds_robust(
-        time_surface, pressure_S,
-        time_downhole, pressure_D,
-        max_lag_s=4*3600,    # 4 hours
+        time_S, pressure_S,          # masked/aligned series
+        time_D, pressure_D,
+        max_lag_s=4*3600,            # 4 hours
         detrend_window_s=120
     )
 except Exception as e:
@@ -211,86 +208,105 @@ p_downhole_corr, _ = well_corrections.hydrostatic_correct_to_fracture(
 )
 
 # ----------------------------
-# Build aligned timelines (DOWNHOLE clock)
+# Build aligned timelines (DOWNHOLE clock) – for visual QC
 # ----------------------------
 surface_dt_orig  = pd.to_datetime(time_S)
 downhole_dt_orig = pd.to_datetime(time_D)
-
-# Shift SURFACE timestamps by **-lag_s** to align onto DOWNHOLE clock
 surface_dt_aligned_to_dh = surface_dt_orig - pd.to_timedelta(float(lag_s), unit='s')
 
 y_surface  = pd.Series(p_surface_corr, copy=False).astype(float).to_numpy()
 y_downhole = pd.Series(p_downhole_corr, copy=False).astype(float).to_numpy()
 
-# Plot alignment (datetime)
 figA, axA = plotting.plot_alignment(surface_dt_aligned_to_dh, y_surface, downhole_dt_orig, y_downhole, figsize=(16, 6))
 
 # ----------------------------
-# Closure analysis (DOWNHOLE time basis)
+# MULTI-CYCLE: detect all pump-in → shut-in cycles (surface clock)
+# and cut each falloff at (pump restart | flow-back start | end of data)
 # ----------------------------
-# Auto shut-in detection on SURFACE clock
-t_shut_in_auto_surface = closure_analysis.find_shut_in_time_from_flow(
-    time_S, flowrate_S, threshold=0.1, min_hold_s=30
+cycles = closure_analysis.detect_pump_cycles(
+    time_S=time_S,
+    q_m3h=flowrate_S,
+    return_vol_S=return_volume_S,   # pass None if not available
+    q_low=0.1, q_high=0.3,
+    min_hold_s=30,
+    min_gap_s=60,
+    flowback_rate_thresh=0.2
 )
-print("Auto-detected shut-in (surface clock):", t_shut_in_auto_surface)
+print(f"Detected {len(cycles)} cycles.")
 
-# Choose shut-in on SURFACE clock
-t_shut_in_surface = t_shut_in_auto_surface if t_shut_in_auto_surface is not None else pd.to_datetime(time_S.iloc[-1])
+# ----------------------------
+# Analyze each cycle on DOWNHOLE clock using corrected DH pressure
+# ----------------------------
+MIN_T_S_FOR_PICK = 1  # seconds to ignore early wellbore storage
+df_cycles = closure_analysis.analyze_all_shutins(
+    cycles,
+    time_S=time_S, flowrate_S=flowrate_S, return_volume_S=return_volume_S,
+    time_D=time_D, p_downhole_corr=p_downhole_corr,
+    lag_s=lag_s,
+    min_falloff_s=120,
+    min_t_s_for_pick=MIN_T_S_FOR_PICK,  # <-- NEW: pick closure after 1 second
+    max_analysis_s=180   # <-- NEW: only first 3 minutes after shut-in
+)
+print(df_cycles)
 
-# Convert shut-in to DOWNHOLE clock by shifting **-lag_s**
-t_shut_in_downhole = t_shut_in_surface - pd.to_timedelta(float(lag_s), unit='s')
-print("Shut-in used for DH analysis (downhole clock):", t_shut_in_downhole)
+# ----------------------------
+# OPTIONAL: visualize per-cycle falloff windows & picks
+# ----------------------------
+MIN_T_S_FOR_PICK = 1  # seconds to ignore early wellbore storage
 
-# Build downhole falloff series using DOWNHOLE times + chosen shut-in (on DOWNHOLE clock)
-ts_dh, p_dh = closure_analysis.build_shut_in_series(time_D, p_downhole_corr, t_shut_in_downhole)
-print(f"Falloff samples: {len(ts_dh)}; duration = {ts_dh[-1]:.1f} s")
+for _, row in df_cycles.iterrows():
+    if not row.get('usable', False):
+        continue
+    # reconstruct window on DH clock for plotting
+    t_shut_D = row['t_shut_in_surface'] - pd.to_timedelta(float(lag_s), unit='s')
+    t_end_D  = row['t_end_surface']      - pd.to_timedelta(float(lag_s), unit='s')
 
-# Square-root-of-time diagnostic
-x_sqrt, p_srt, dpdx = closure_analysis.derivative_vs_sqrt_time(ts_dh, p_dh)
-figSRT, axesSRT = plotting.plot_srt(x_sqrt, p_srt, dpdx)
-
-# Suggest closure candidate (first derivative minimum after ~1–2 min)
-i_cl = closure_analysis.suggest_closure_from_srt(x_sqrt, p_srt, dpdx, min_t_s=90, guard_s=3)
-if i_cl is not None:
-    for a in axesSRT:
-        a.axvline(x_sqrt[i_cl], ls='--')
-    p_closure = p_srt[i_cl]
-    print(f"Suggested closure (SRT): t = {x_sqrt[i_cl]**2:.1f} s,  P ≈ {p_closure:.2f} bar")
-
-# Bourdet derivative
-t_log, dP_dlogt = closure_analysis.bourdet_derivative(ts_dh, p_dh, smooth_win=None)
-figBRD, axBRD = plotting.plot_bourdet(t_log, dP_dlogt, x_sqrt=x_sqrt, i_cl=i_cl)
+    ts_dh, p_dh = closure_analysis.build_shut_in_series(time_D, p_downhole_corr, t_shut_D)
+    t_end_rel = (pd.to_datetime(t_end_D) - pd.to_datetime(t_shut_D)).total_seconds()
+    t_hard_cap = min(float(t_end_rel), 180.0)
+    keep = (ts_dh <= t_hard_cap)
+    ts_dh, p_dh = ts_dh[keep], p_dh[keep]
 
 
-# --- WELLBORE STORAGE: estimate C_well from pre-breakdown PV and compute q_perf ---
+    x_sqrt, p_srt, dpdx = closure_analysis.derivative_vs_sqrt_time(ts_dh, p_dh)
+    i_cl = closure_analysis.suggest_closure_from_srt(
+        x_sqrt, p_srt, dpdx,
+        min_t_s=MIN_T_S_FOR_PICK,
+        guard_n=5,
+        max_t_s=180,
+        prefer_global_min=True,
+        dpdx_smooth_pts=5
+    )
 
-# 1) Choose a pre-breakdown window on the SURFACE clock (edit these to your test)
+    figSRT, axesSRT = plotting.plot_srt(x_sqrt, p_srt, dpdx)
+    if i_cl is not None:
+        for a in axesSRT:
+            a.axvline(x_sqrt[i_cl], ls='--', color='k')
+    figSRT.suptitle(f"Cycle {int(row['cycle'])} – FCP ≈ {row['closure_pressure_bar']:.2f} bar")
+
+# ----------------------------
+# WELLBORE STORAGE example (unchanged)
+# ----------------------------
 pre_start = pd.to_datetime("2023-12-10 15:40:00")
 pre_end   = pd.to_datetime("2023-12-10 16:00:00")
 mask_pre  = (time_S >= pre_start) & (time_S <= pre_end)
 
-# 2) Estimate C_well = dV/dp [m^3/bar] from PV slope on that linear segment
 C_well, stats = well_corrections.estimate_wellbore_compliance_from_pv(
     time_S, pressure_S, volume_S, mask=mask_pre
 )
 print(f"C_well ≈ {C_well:.4f} m³/bar  (n={stats['n']}, R²={stats['r2']:.3f}, "
       f"p∈[{stats['p_range'][0]:.1f},{stats['p_range'][1]:.1f}] bar)")
 
-# 3) Compute q@perfs from surface flow and dp/dt: q_perf = q_pump - C_well * dp/dt
 q_perf_S, diag = well_corrections.flow_at_perfs_from_surface(
-    q_pump=flowrate_S,          # surface flow (usually m³/h)
-    time_q=time_S,              # same clock as pump logger
-    pressure_bar=pressure_S,    # treating pressure (bar)
-    time_p=time_S,              # same clock as pressure
+    q_pump=flowrate_S,
+    time_q=time_S,
+    pressure_bar=pressure_S,
+    time_p=time_S,
     C_well_m3_per_bar=C_well,
     out_units='m3/h',
-    smooth_dpdt_s=5             # small smoothing for dp/dt
+    smooth_dpdt_s=5
 )
 print("q_perf head [m³/h]:", q_perf_S.head(3).to_list())
-
-# 4) (Optional) Plot q_pump vs q_perf and C_well*dp/dt
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
 fig_q, axq = plt.subplots(figsize=(14, 5))
 axq.plot(time_S, flowrate_S, label='q_pump (surface) [m³/h]', lw=1)
@@ -313,3 +329,51 @@ fig_q.autofmt_xdate()
 fig_q.tight_layout()
 
 plt.show()
+
+# --- Estimate pumping duration tp (from surface flow) ---
+#def _first_pump_time(time_series, flow_series, threshold=0.1, hold_s=30):
+#    t = pd.to_datetime(pd.Series(time_series))
+#    q = pd.Series(flow_series, dtype=float)
+    # first sustained rise above threshold
+#    for i in range(len(q)):
+#        if pd.notna(q.iloc[i]) and q.iloc[i] > threshold:
+#            t0 = t.iloc[i]
+            # hold check to skip noise
+#            j = i
+#            ok = True
+#            while j < len(q) and (t.iloc[j] - t0).total_seconds() <= hold_s:
+#                if pd.notna(q.iloc[j]) and q.iloc[j] <= threshold:
+#                    ok = False; break
+#                j += 1
+#            if ok:
+#                return t0
+#    return None
+
+#t_pump_start_surface = _first_pump_time(time_S, flowrate_S, threshold=0.1, hold_s=30)
+#if t_pump_start_surface is None:
+    # fallback: 30 minutes before shut-in
+#    t_pump_start_surface = t_shut_in_surface - pd.to_timedelta(30, unit='m')
+
+#tp_seconds = (t_shut_in_surface - t_pump_start_surface).total_seconds()
+#print(f"Estimated pumping duration tp ≈ {tp_seconds/60:.1f} min")
+
+# --- Barree Figures 1–4 (Normal Leakoff) on DOWNHOLE falloff series ---
+#barree_figs = plotting.plot_barree_figs_normal_leakoff(
+#    t_post_s=ts_dh,
+#    p_post=p_dh,
+#    tp_seconds=tp_seconds,
+#    isip=None,                # default: first post-shut-in sample
+#    closure_idx=None,         # let auto-closure from G semilog derivative pick it
+#    auto_closure=True,
+#    auto_fit_frac=0.25,
+#    auto_tol=0.10,
+#    pi_guess=None             # optional; derivative doesn't depend on this
+#)
+
+# optional: save
+#for name, fig in barree_figs.items():
+#    fig.suptitle(name)
+#    fig.savefig(f"figures\{name}.png", dpi=200, bbox_inches='tight')
+
+
+#plt.show()
