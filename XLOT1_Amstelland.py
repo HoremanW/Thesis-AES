@@ -8,7 +8,7 @@ import datetime as dt
 # Local modules
 import time_difference
 import well_corrections
-import closure_analysis_old as closure_analysis
+import closure_analysis as closure_analysis
 import plotting
 
 # ----------------------------
