@@ -738,3 +738,4 @@ def plot_g_intersection(
     ax.legend(loc="best")
     fig.tight_layout()
     return fig, ax
+

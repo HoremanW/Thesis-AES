@@ -542,69 +542,104 @@ def g_diagnostic(ts_seconds, p, tp_seconds):
     return G, semilog_dP
 
 
-def fcp_by_sqrt_intersection(t_seconds, p, *, max_t_s=180, min_left=8, min_right=8):
+# --- √t intersection (returns line fits too) ---
+def fcp_by_sqrt_intersection(ts_seconds, p, *, max_t_s=None, min_left=8, min_right=8):
     """
-    Closure by intersection on P vs √t.
-    Returns dict with closure pressure and time if ok, else ok=False.
+    Fit straight lines to early/late segments of P vs √t and return
+    the intersection + line fits (for plotting).
     """
-    t = np.asarray(t_seconds, float)
+    t = np.asarray(ts_seconds, float)
     pp = np.asarray(p, float)
-
     m = np.isfinite(t) & np.isfinite(pp) & (t >= 0)
     if max_t_s is not None:
         m &= (t <= float(max_t_s))
-    t, pp = t[m], pp[m]
-    if len(t) < min_left + min_right + 1:
-        return {'ok': False, 'reason': 'too_few_points'}
+    if not m.any():
+        return {"ok": False}
 
-    x = np.sqrt(t)
-    fit = _two_segment_intersection(x, pp, min_left=min_left, min_right=min_right)
-    if not fit.get('ok', False):
-        return fit
+    x = np.sqrt(t[m])      # √t
+    y = pp[m]
 
-    # convert x* back to time (seconds)
-    t_star = max(0.0, fit['x_star']**2)
+    if len(x) < (min_left + min_right):
+        return {"ok": False}
+
+    xL, yL = x[:min_left],      y[:min_left]
+    xR, yR = x[-min_right:],    y[-min_right:]
+
+    aL, bL = np.polyfit(xL, yL, 1)
+    aR, bR = np.polyfit(xR, yR, 1)
+
+    if np.isclose(aL, aR):
+        return {"ok": False}
+
+    x_int = (bR - bL) / (aL - aR)
+    y_int = aL * x_int + bL
+
+    # small helper segments to draw (exactly over the data range)
+    xL_fit = np.array([xL.min(), xL.max()])
+    yL_fit = aL * xL_fit + bL
+    xR_fit = np.array([xR.min(), xR.max()])
+    yR_fit = aR * xR_fit + bR
+
     return {
-        'ok': True,
-        'closure_time_s': float(t_star),
-        'closure_pressure_bar': float(fit['y_star']),
-        'break_index': fit['i_break'],
-        'fit': fit
+        "ok": True,
+        "closure_time_s": float(x_int**2),
+        "closure_pressure_bar": float(y_int),
+        "aL": aL, "bL": bL, "aR": aR, "bR": bR,
+        "xL_fit": xL_fit, "yL_fit": yL_fit,
+        "xR_fit": xR_fit, "yR_fit": yR_fit,
+        # for convenience if you want to re-plot data on √t
+        "x_data": x, "y_data": y
     }
 
-def fcp_by_g_intersection(t_seconds, p, tp_seconds, *, max_t_s=180, min_left=8, min_right=8):
-    """
-    Closure by intersection on P vs G(t/tp).
-    Returns dict with closure pressure and time if ok, else ok=False.
-    """
-    t = np.asarray(t_seconds, float)
-    pp = np.asarray(p, float)
 
+# --- G-function intersection (returns line fits too) ---
+def fcp_by_g_intersection(ts_seconds, p, *, tp_seconds, max_t_s=None, min_left=8, min_right=8):
+    """
+    Fit straight lines to early/late segments of P vs G and return
+    the intersection + line fits (for plotting).
+    """
+    t = np.asarray(ts_seconds, float)
+    pp = np.asarray(p, float)
     m = np.isfinite(t) & np.isfinite(pp) & (t >= 0)
     if max_t_s is not None:
         m &= (t <= float(max_t_s))
-    t, pp = t[m], pp[m]
-    if len(t) < min_left + min_right + 1:
-        return {'ok': False, 'reason': 'too_few_points'}
+    if not m.any():
+        return {"ok": False}
 
-    # Build G on the same t grid
-    G = g_function_high_efficiency(t, tp_seconds=max(1.0, float(tp_seconds)))
-    fit = _two_segment_intersection(G, pp, min_left=min_left, min_right=min_right)
-    if not fit.get('ok', False):
-        return fit
+    G = g_function_high_efficiency(t[m], float(tp_seconds))
+    y = pp[m]
 
-    # Convert x*=G* back to time is non-trivial analytically; we can map by nearest index
-    # (closure pressure is what matters; time is approximate)
-    # Nearest t where G≈G*:
-    i_near = int(np.nanargmin(np.abs(G - fit['x_star'])))
-    t_star = float(t[i_near])
+    if len(G) < (min_left + min_right):
+        return {"ok": False}
 
+    xL, yL = G[:min_left],   y[:min_left]
+    xR, yR = G[-min_right:], y[-min_right:]
+
+    aL, bL = np.polyfit(xL, yL, 1)
+    aR, bR = np.polyfit(xR, yR, 1)
+
+    if np.isclose(aL, aR):
+        return {"ok": False}
+
+    x_int = (bR - bL) / (aL - aR)
+    y_int = aL * x_int + bL
+
+    xL_fit = np.array([xL.min(), xL.max()])
+    yL_fit = aL * xL_fit + bL
+    xR_fit = np.array([xR.min(), xR.max()])
+    yR_fit = aR * xR_fit + bR
+
+    # We keep closure_time_s in seconds (your main time base). If you only need the
+    # intersection on G for plotting, it's x_int (dimensionless); time mapping not needed here.
     return {
-        'ok': True,
-        'closure_time_s': t_star,
-        'closure_pressure_bar': float(fit['y_star']),
-        'break_index': fit['i_break'],
-        'fit': fit
+        "ok": True,
+        "closure_time_s": float((x_int - G[0]) / (G[-1] - G[0]) * (t[m][-1] - t[m][0]) + t[m][0]),
+        "closure_pressure_bar": float(y_int),
+        "aL": aL, "bL": bL, "aR": aR, "bR": bR,
+        "xL_fit": xL_fit, "yL_fit": yL_fit,
+        "xR_fit": xR_fit, "yR_fit": yR_fit,
+        "x_int_g": float(x_int),   # handy for plotting the vertical marker on G
+        "x_data": G, "y_data": y
     }
 
 
