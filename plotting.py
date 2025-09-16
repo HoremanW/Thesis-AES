@@ -216,10 +216,10 @@ def plot_srt(
     if i_cl is not None and 0 <= i_cl < len(x) and np.isfinite(x[i_cl]):
         ax_left.axvline(x[i_cl], ls=":", lw=1.2, color="k")
 
-    # Combined legend (left + right)
-    lines = [line_p, line_d_norm, line_d_semi]
-    labels = [l.get_label() for l in lines]
-    ax_left.legend(lines, labels, loc="best")
+    # Combined legend: collect from both left and right axes
+    h1, l1 = ax_left.get_legend_handles_labels()
+    h2, l2 = ax_right.get_legend_handles_labels()
+    ax_left.legend(h1 + h2, l1 + l2, loc="best")
 
     fig.tight_layout()
     return fig, (ax_left, ax_right)
@@ -305,7 +305,7 @@ def plot_bourdet(t_log, dP_dlogt, *, p=None, p_times=None, i_cl=None, cap_s=None
         ax_left.legend(lines, [l.get_label() for l in lines], loc="best")
 
     fig.tight_layout()
-    return fig, ax_left
+    return fig, (ax_left, ax_right)
 
 # assumes closure_analysis.g_function_high_efficiency and .semilog_derivative exist
 
@@ -417,7 +417,7 @@ def plot_gfunction(
     #ax_right.set_ylim(-10, 10)
 
     fig.tight_layout()
-    return fig, ax_left
+    return fig, (ax_left, ax_right)
 
 
 
