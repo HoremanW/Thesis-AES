@@ -292,4 +292,46 @@ def flow_at_perfs_from_surface(q_pump, time_q, pressure_bar, time_p, C_well_m3_p
     }
     return pd.Series(q_out, index=pd.Series(time_q).index), parts
 
+def _to_epoch_s(ts):
+    t = pd.to_datetime(pd.Series(ts)).astype("int64") / 1e9  # ns -> s
+    return t.to_numpy(dtype=float)
 
+# ----------------------------
+# Wellbore storage & perf rate
+# ----------------------------
+
+def _dVdP_df(time_S, volume_S, pressure_S, *, small=1e-9, smooth_window=5):
+    """
+    Compute C_well(t)=dV/dP along with dV/dt and dP/dt on the SURFACE clock.
+    Returns a DataFrame with columns:
+      time, pressure_bar, volume_m3, dVdt_m3_per_s, dPdt_bar_per_s, dVdP_m3_per_bar
+    """
+    t_s = _to_epoch_s(time_S)
+    V   = pd.Series(volume_S, dtype=float).to_numpy()
+    P   = pd.Series(pressure_S, dtype=float).to_numpy()
+
+    m = np.isfinite(t_s) & np.isfinite(V) & np.isfinite(P)
+    t_s, V, P = t_s[m], V[m], P[m]
+    order = np.argsort(t_s, kind="mergesort")
+    t_s, V, P = t_s[order], V[order], P[order]
+    t_idx = pd.to_datetime(pd.Series(time_S).to_numpy()[m][order])
+
+    dVdt = np.gradient(V, t_s)           # m^3/s
+    dPdt = np.gradient(P, t_s)           # bar/s
+    dPdt_safe = dPdt.copy()
+    dPdt_safe[np.abs(dPdt_safe) < small] = np.nan
+    dVdP = dVdt / dPdt_safe              # m^3/bar
+
+    if smooth_window and smooth_window >= 3:
+        dVdt = pd.Series(dVdt).rolling(smooth_window, center=True, min_periods=1).median().to_numpy()
+        dPdt = pd.Series(dPdt).rolling(smooth_window, center=True, min_periods=1).median().to_numpy()
+        dVdP = pd.Series(dVdP).rolling(smooth_window, center=True, min_periods=1).median().to_numpy()
+
+    return pd.DataFrame({
+        "time": t_idx,
+        "pressure_bar": P,
+        "volume_m3": V,
+        "dVdt_m3_per_s": dVdt,
+        "dPdt_bar_per_s": dPdt,
+        "dVdP_m3_per_bar": dVdP
+    })

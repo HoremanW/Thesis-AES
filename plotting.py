@@ -739,3 +739,12 @@ def plot_g_intersection(
     fig.tight_layout()
     return fig, ax
 
+def plot_q_perf(time_array, q_pump_m3h, q_perf_m3h, *, figsize=(12, 4)):
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(time_array, q_pump_m3h, lw=1.2, label="q_pump [m³/h]")
+    ax.plot(time_array, q_perf_m3h, lw=1.2, label="q_perf [m³/h]")
+    ax.set_xlabel("Time"); ax.set_ylabel("Rate [m³/h]")
+    _fmt_hhmm(ax); ax.grid(True, alpha=0.4); ax.legend()
+    fig.tight_layout()
+    return fig, ax
+
